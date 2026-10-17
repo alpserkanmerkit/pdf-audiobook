@@ -1,0 +1,18 @@
+# apt packages for the demo smoke (scripts/demo-smoke.sh, e2e.sh --linux) (Ubuntu 24.04 / ubuntu-latest).
+# One package name per line; inline `# comments` are stripped (see scripts/e2e-apt-install.sh).
+#   bash scripts/e2e-apt-install.sh [--list]    # installs only the MISSING ones; --list: only prints the missing ones
+# (Do NOT use a raw `apt-get install $(grep -v '^#' ...)`: on `package  # description` lines the comment words would be taken as package names.)
+#
+# VM mode (default, `bash scripts/e2e.sh`): NONE of these are needed (only the Flutter SDK).
+# Linux mode (`bash scripts/e2e.sh --linux`, demo-smoke): the packages below.
+#
+# The ubuntu-24.04 runner image (runner-images 20260927.320.1 README) INCLUDES these, so they are NOT in the list:
+#   clang 16/17/18, cmake 3.31, ninja 1.13, pkg-config, xvfb (+ xvfb-run), g++/make.
+#   (cmake/ninja are binaries on the image, not dpkg packages: so they are checked by COMMAND, not dpkg,
+#    see e2e-apt-install.sh `ARAC_KOMUTLARI`; if missing on the image, the script installs them.)
+# Needed but NOT listed: these come anyway with the libgtk-3-dev dependency tree (verified with
+# `apt-cache depends --recurse`): liblzma-dev, libegl1, libgl1-mesa-dri (software OpenGL/llvmpipe), pkgconf.
+# xdotool REMOVED: no script uses it (only a comment line in demo-smoke.sh).
+xvfb                # on the image; xvfb-run: virtual X11 screen on a headless server (installed if missing)
+libgtk-3-dev        # Linux desktop build (GTK3 headers; pkg-config gtk+-3.0) -- NOT on the image, the main apt cost
+imagemagick         # NOT on the image; demo-shot/demo-smoke: `import -window root` (screenshot) + `identify` (blank PNG check)

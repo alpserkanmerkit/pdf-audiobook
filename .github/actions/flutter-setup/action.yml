@@ -1,0 +1,85 @@
+name: Flutter setup (cached)
+description: >-
+  Restores the Flutter SDK (pinned) + ~/.pub-cache cache, installs Flutter, installs apt packages in the
+  BACKGROUND for jobs that need them, and runs `flutter pub get`. All jobs use the same interface (docs/CI.md).
+inputs:
+  flutter-version:
+    description: "Flutter version (pinned; goes into the SDK cache key)"
+    default: "3.35.7"
+  cache:
+    description: "'true': Flutter SDK + ~/.pub-cache cache (restore; if missing, save at the end of the job)"
+    default: "true"
+  apt:
+    description: "'true': `bash scripts/e2e-apt-install.sh` (xvfb/GTK/ImageMagick; only missing packages). For smoke jobs"
+    default: "false"
+  pub-get:
+    description: "'true': `flutter pub get --enforce-lockfile` at the end of setup"
+    default: "true"
+runs:
+  using: composite
+  steps:
+    # apt starts in the background so it does not wait in sequence with the SDK cache/pub get (network + dpkg;
+    # no clash with the Flutter install). Its end is checked in the last "wait for apt" step; a failure is RED.
+    # Timeout: the whole script 480 s (`timeout`); 240 s per attempt + 2 attempts + dpkg lock wait inside the script.
+    # (`timeout-minutes` is not supported in composite steps -> the limit lives in the script.)
+    - name: apt packages (start in background)
+      if: inputs.apt == 'true'
+      shell: bash
+      run: |
+        d="$RUNNER_TEMP/flutter-setup-apt"
+        rm -f "$d.log" "$d.durum" "$d.pid"
+        # shellcheck disable=SC2016  # single quotes are INTENTIONAL: $$ and $1 are expanded in the sub-shell
+        nohup setsid bash -c 'echo $$ >"$1.pid"; timeout -k 10 480 bash scripts/e2e-apt-install.sh >"$1.log" 2>&1; echo $? >"$1.durum"' _ "$d" \
+          >/dev/null 2>&1 </dev/null &
+        echo "apt started in background"
+
+    # Flutter SDK: subosito/flutter-action caches the SDK directory (incl. bin/cache) with its own actions/cache@v5 step.
+    # Key = flutter-<os>-<channel>-<version>-<arch>-<SDK commit hash> (the action's default): depends on the VERSION,
+    # NOT on pubspec.lock -> a dependency change does not re-download/re-save the 1+ GB SDK. The pub cache is separate, below.
+    - name: Flutter ${{ inputs.flutter-version }} (SDK cache)
+      uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        flutter-version: ${{ inputs.flutter-version }}
+        cache: ${{ inputs.cache }}
+        pub-cache: "false"
+
+    # pub cache: full key = os + version + pubspec.lock hash; when the lock changes, restore-keys brings the nearest previous cache
+    # (pub get downloads only the diff). `.dart_tool` is DELIBERATELY not cached: pub get already regenerates package_config.json
+    # from the warm pub-cache, and the time did not change with a cached .dart_tool (measurement: docs/CI.md).
+    - name: pub cache (~/.pub-cache)
+      if: inputs.cache == 'true'
+      uses: actions/cache@v5
+      with:
+        path: ~/.pub-cache
+        key: pub-${{ runner.os }}-${{ inputs.flutter-version }}-${{ hashFiles('pubspec.lock') }}
+        restore-keys: |
+          pub-${{ runner.os }}-${{ inputs.flutter-version }}-
+
+    # --enforce-lockfile: RED if pubspec.lock and pubspec.yaml do not match (CI must not silently resolve another version).
+    - name: Dependencies (flutter pub get)
+      if: inputs.pub-get == 'true'
+      shell: bash
+      run: flutter pub get --enforce-lockfile
+
+    - name: wait for apt to finish
+      if: inputs.apt == 'true'
+      shell: bash
+      run: |
+        d="$RUNNER_TEMP/flutter-setup-apt"
+        for _ in $(seq 1 500); do
+          [ -f "$d.durum" ] && break
+          # Was the background process killed (pid written, no process, no status file)? -> retry synchronously.
+          pid="$(cat "$d.pid" 2>/dev/null || true)"
+          if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            sleep 1
+            [ -f "$d.durum" ] && break
+            echo "::warning::apt background process disappeared; retrying synchronously"
+            timeout -k 10 480 bash scripts/e2e-apt-install.sh >"$d.log" 2>&1; echo $? >"$d.durum"; break
+          fi
+          sleep 1
+        done
+        echo "::group::apt log"; cat "$d.log" 2>/dev/null || true; echo "::endgroup::"
+        [ -f "$d.durum" ] || { echo "::error::apt did not finish within 500 s"; exit 1; }
+        rc="$(cat "$d.durum")"
+        [ "$rc" = 0 ] || { echo "::error::apt install failed (exit $rc)"; exit 1; }

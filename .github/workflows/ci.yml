@@ -1,0 +1,206 @@
+name: CI
+
+# Shared top part (docs/CI.md): triggers, cancellation, permissions, env. Job blocks are below.
+# Trigger: push to main and gece/**, every PR, and manually (workflow_dispatch). Pushes are limited to these
+# branches so one branch does not run twice (push + PR); on other branches use "Run workflow" manually.
+on:
+  push:
+    branches: [main, "gece/**"]
+  pull_request:
+  workflow_dispatch:
+
+# Older runs for the same branch/PR are cancelled (saves quota).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_SUPPRESS_ANALYTICS: "true"
+  DART_SUPPRESS_ANALYTICS: "true"
+
+jobs:
+  # --- analyze/test (shard) ---------------------------------------------------------------------
+  # The old single `test` job (pub get + analyze + full suite, 5 min 1 s on the runner) was split in two:
+  #   analyze : format + static analysis + shard partition check (small, fast red feedback)
+  #   test    : 3 parallel shards (matrix), each runs ONLY its own test files
+  # Setup (Flutter SDK + pub cache + pub get) lives in the shared composite action: ./.github/actions/flutter-setup
+  # (inputs: flutter-version default 3.35.7, cache default true). Design: same analyze/test(shard) layout as the
+  # main repo's gate.yml (single entry file + duration-balanced LPT distribution).
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/flutter-setup
+      # Format (dart format, ~4 s) and the partition check (seconds) run BEFORE analysis: cheapest failure first.
+      - name: Format
+        run: dart format --output=none --set-exit-if-changed lib test integration_test
+      - name: Shard partition check (each test file in exactly 1 shard)
+        run: bash scripts/ci-shard-check.sh
+      - name: Static analysis
+        run: flutter analyze --fatal-infos --no-pub
+
+  # WHY `flutter test --total-shards/--shard-index` is NOT USED: the flags work but split the tests INSIDE files,
+  # not the test FILES (measured: each shard compiles ~140 of 154 files) -> the build cost multiplies with the shard count.
+  # Instead, scripts/ci-test-shard.sh distributes the files into duration-balanced shards (LPT, scripts/ci-test-weights.txt) and
+  # compiles the shard's files once in a single entry file (test/_ci_shard_test.dart).
+  # Shard count: the matrix `shard` list + `total` (scripts/ci-shard-check.sh checks that the two agree).
+  test:
+    name: test (${{ matrix.shard }}/${{ matrix.total }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+        total: [3]
+    env:
+      SHARD: ${{ matrix.shard }}
+      TOTAL: ${{ matrix.total }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/flutter-setup
+      - name: Shard entry file
+        run: |
+          # Runner evidence (vCPU/RAM): measurement input for the shard count decision (assumes a private-repo standard runner with 2 vCPU/7 GB).
+          echo "shard $SHARD/$TOTAL runner: $(nproc) vCPU, $(free -m | awk '/Mem:/ { print $2 }') MB RAM" | tee -a "$GITHUB_STEP_SUMMARY"
+          bash scripts/ci-test-shard.sh "$SHARD" "$TOTAL"
+      - name: Test
+        run: |
+          mkdir -p reports
+          rc=0
+          flutter test --no-pub --reporter expanded --file-reporter json:reports/tests.json \
+            test/_ci_shard_test.dart > test.log 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::group::FAILED tests ([E])"; grep -n '\[E\]' test.log | head -n 60 || true; echo "::endgroup::"
+            echo "---- last 200 lines of test.log ----"; tail -n 200 test.log
+            exit "$rc"
+          fi
+          tail -n 3 test.log
+          n=$(grep -oE '\+[0-9]+( ~[0-9]+)?: All tests passed' test.log | tail -n 1 | grep -oE '^\+[0-9]+' | tr -d '+' || true)
+          [ -n "$n" ] || { echo "could not read test count -> RED"; exit 1; }
+          echo "shard $SHARD/$TOTAL: $n tests passed" | tee -a "$GITHUB_STEP_SUMMARY"
+      # Observation only (does not affect the gate): shard duration + weight table -> step summary (to track balance).
+      - name: Timing summary
+        if: success() || failure()
+        run: python3 -I scripts/ci-test-timing.py reports/tests.json >> "$GITHUB_STEP_SUMMARY" || true
+
+  # Single summary gate: branch protection is attached ONLY to this job (`ci-ok`). always(): runs even if one of the needs
+  # is failed/cancelled/skipped, and ends red (a skipped job is NOT counted as green).
+  ci-ok:
+    needs: [analyze, test, smoke-shot, smoke-e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Result
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needs results: $RESULTS"
+          for r in $RESULTS; do
+            [ "$r" = "success" ] || { echo "ci-ok RED: a job ended as '$r'"; exit 1; }
+          done
+          echo "ci-ok: all required jobs are green"
+
+  # --- smoke (parallel) ---
+  # DEMO smoke test (demo without an API key, lib/main_demo.dart, headless/xvfb) has THREE steps; all three are
+  # called with `bash scripts/demo-smoke.sh unit|shot|e2e|all`. In CI the steps run in SEPARATE runners in parallel,
+  # wall clock = the slowest one (previously sequential: unit + shot + e2e).
+  #
+  # NO smoke-unit (decision): `flutter test test/demo` is already covered by `flutter test` (under test/) -> it runs in the test
+  # shards; a separate runner (setup ~20+ s + the same 5 files) would only repeat work. Conditional change: if shard
+  # partitioning EXCLUDES test/demo/**, this job is added back (`bash scripts/demo-smoke.sh unit`). Locally
+  # `bash scripts/demo-smoke.sh` (= all) runs the three steps sequentially.
+  #
+  # Linux build cache (smoke-shot only). Measurements (2 vCPU: taskset -c 0,1; local, Flutter 3.35.7):
+  #   flutter build linux --debug -t lib/main_demo.dart: cold ~35 s (CPU 34 s), from cache + small Dart change ~14 s
+  #   (cache 110 MB compressed, extraction ~3 s). --release 88 s (CPU 82): debug is 2.4x FASTER, and integration_test needs debug.
+  #   ccache: the C/C++ objects part is ~15 s, gain ~2 s (measured) -> NOT USED.
+  # Since the target is fixed (lib/main_demo.dart), .dart_tool/flutter_build/<hash>/app.dill takes part in incremental builds. build/ and
+  # .dart_tool/flutter_build are cached TOGETHER: one without the other is inconsistent (missing native_assets/ -> cmake install error,
+  # measured); still, on a broken cache demo-shot.sh clears the cache in CI and tries ONCE cold (with a clear message).
+  # smoke-e2e does NOT use a cache: the `flutter test -d linux` target has a listener.dart in a random temp dir on every run
+  # (-> new <hash> on every run, app.dill is not reused); the build/ cache only saved ~3 CPU-s (measured).
+  # Builds are NOT shared between the two jobs (artifact): only the C++ part is common (~10 s); the kernel (Dart) targets differ.
+  smoke-shot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      FLUTTER_VERSION: "3.35.7"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup (Flutter + pub + apt)
+        uses: ./.github/actions/flutter-setup
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          apt: "true"
+
+      # Key: Flutter version + pubspec.lock + linux/ (CMake/runner). lib/ is NOT in the key: a source change does not invalidate the cache,
+      # the incremental build compiles the diff. Weekly period: the cache is renewed at least once a week (drift is bounded).
+      - name: Build cache key (week)
+        id: hafta
+        run: echo "hafta=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Build cache (build/ + .dart_tool/flutter_build)
+        uses: actions/cache@v5
+        with:
+          path: |
+            build
+            .dart_tool/flutter_build
+          key: demo-linux-shot-${{ env.FLUTTER_VERSION }}-${{ runner.os }}-${{ steps.hafta.outputs.hafta }}-${{ hashFiles('pubspec.lock', 'linux/**') }}
+          restore-keys: |
+            demo-linux-shot-${{ env.FLUTTER_VERSION }}-${{ runner.os }}-
+
+      - name: Linux debug build (demo)
+        run: bash scripts/demo-shot.sh --build-only
+
+      - name: Startup proof (xvfb + PNG)
+        env:
+          DEMO_SHOT_NO_BUILD: "1"
+          SMOKE_OUT: ${{ runner.temp }}/demo-smoke
+        run: bash scripts/demo-smoke.sh shot
+
+      - name: Screenshot (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-smoke-shot-png
+          path: ${{ runner.temp }}/demo-smoke/*.png
+          retention-days: 3
+          if-no-files-found: warn
+
+  smoke-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      FLUTTER_VERSION: "3.35.7"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup (Flutter + pub + apt)
+        uses: ./.github/actions/flutter-setup
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          apt: "true"
+
+      # Build (kernel + C++) and test in the same command (`flutter test -d linux`); step duration = build + flow 7.
+      - name: E2E flow 7 (Linux build + xvfb + test + PNG)
+        env:
+          SMOKE_OUT: ${{ runner.temp }}/demo-smoke
+        run: bash scripts/demo-smoke.sh e2e
+
+      - name: Screenshots (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-smoke-e2e-png
+          path: ${{ runner.temp }}/demo-smoke/*.png
+          retention-days: 3
+          if-no-files-found: warn

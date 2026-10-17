@@ -1,0 +1,20 @@
+Third-party notice
+
+The source code in this repository is licensed under the MIT License (see LICENSE).
+
+This app depends on packages that are distributed under their own licenses.
+They are NOT covered by the MIT License of this repository:
+
+- syncfusion_flutter_pdf (https://pub.dev/packages/syncfusion_flutter_pdf)
+  Licensed by Syncfusion under the Syncfusion Community License or a commercial
+  license. Per the package page, the Community License is available to
+  individuals and organizations with less than USD 1 million in annual gross
+  revenue and fewer than five developers. Anyone who builds or distributes this
+  app must hold a valid Syncfusion license and accept Syncfusion's terms.
+
+- google_mlkit_text_recognition (https://pub.dev/packages/google_mlkit_text_recognition)
+  The plugin is MIT licensed. It uses Google ML Kit APIs, whose use is governed
+  by the ML Kit terms (https://developers.google.com/ml-kit/terms).
+
+Other dependencies are listed in pubspec.yaml; check each package's license
+before redistributing.

@@ -1,0 +1,25 @@
+Sesli Kitap DEMO - ornek kitap kaynak ve atif notu
+===================================================
+
+Eser     : "Üç Hikâye" (demo derlemesi) - Kaşağı, Forsa, Primo Türk Çocuğu
+Yazar    : Ömer Seyfettin (1884 - 1920)
+Metin    : Vikikaynak (tr.wikisource.org) sayfaları "Kaşağı", "Forsa" ve
+           "Primo Türk Çocuğu" (Kategori: Ömer Seyfettin hikayeleri).
+           Metin Vikikaynak'tan alınmış, sayfa düzeni için temizlenmiştir;
+           eser kamu malıdır, Vikikaynak katkı dili için atıf burada verilmiştir.
+
+Kamu malı dayanağı
+------------------
+Ömer Seyfettin 1920'de öldü; hikâyeler 1912-1919 arasında yayımlandı.
+Türkiye'de 5846 sayılı FSEK md. 27 (ömür + 70 yıl) uyarınca koruma süresi
+dolmuştur; eser kamu malı (public domain) kabul edilir.
+
+PDF
+---
+uc_hikaye.pdf : A5, 21 sayfa. Sayfa 1-7 Kaşağı, 8-14 Forsa, 15-21 Primo Türk
+Çocuğu. Tarayıcı (Chromium) ile HTML'den üretilmiş, Libre Caslon Text yazı
+tipi (SIL OFL) gömülüdür. Yalnızca demo içindir.
+
+Bu dosyadaki kitap, uygulamanın DEMO modunda (lib/main_demo.dart) kütüphanede
+"Üç Hikâye (DEMO)" adıyla görünür. Demo modundaki yapay zekâ yanıtları ve ses
+SAHTEDİR; kitap metni dışında gerçek bir içerik üretilmez.

@@ -1,0 +1,13 @@
+# Test-directory specific relaxation: inherits the root analysis_options.yaml and
+# turns off only two formatting rules (the rules stay ACTIVE for lib/ and tool/).
+include: ../analysis_options.yaml
+
+linter:
+  rules:
+    # 17 findings: long test names / JSON sample strings are split into adjacent
+    # string literals to fit the line width; adding whitespace would change the test
+    # name/sample, and joining them into one line would clash with the formatter and
+    # produce a wide diff.
+    missing_whitespace_between_adjacent_strings: false
+    # 7 findings: for the same reason, long text samples split across list items.
+    no_adjacent_strings_in_list: false

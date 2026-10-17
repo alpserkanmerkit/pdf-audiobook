@@ -1,0 +1,6 @@
+# Keep scripts LF on Windows too.
+*.sh text eol=lf
+# flutter test/pub regenerates these three files with LF on every run.
+windows/flutter/generated_plugin_registrant.cc text eol=lf
+windows/flutter/generated_plugin_registrant.h text eol=lf
+windows/flutter/generated_plugins.cmake text eol=lf
